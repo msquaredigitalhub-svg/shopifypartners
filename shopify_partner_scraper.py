@@ -25,6 +25,8 @@ import sys
 import math
 import uuid
 import threading
+import tempfile
+import os
 from pathlib import Path
 
 import requests
@@ -38,7 +40,7 @@ from openpyxl import Workbook, load_workbook
 BASE_LIST_URL = "https://www.shopify.com/partners/directory/services"
 MAX_PAGES = 302
 DELAY_SECONDS = (1.5, 3.0)
-OUTPUT_FILE = "shopify_partners.xlsx"
+OUTPUT_FILE = os.path.join(tempfile.gettempdir(), "shopify_partners.xlsx")
 REQUEST_TIMEOUT = 20
 MAX_RETRIES = 3
 MAX_REQUESTS_PER_MINUTE = 30

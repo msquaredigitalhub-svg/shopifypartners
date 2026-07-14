@@ -196,6 +196,10 @@ def api_download(download_id):
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     cleanup_download(download_id)
+    try:
+        os.remove(filepath)
+    except OSError:
+        pass
     return response
 
 
