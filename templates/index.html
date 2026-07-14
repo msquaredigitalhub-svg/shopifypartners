@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Shopify Partners Extractor</title>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <style>
 .progress-log .phase { color: #60a5fa; }
 .progress-log .highlight { color: #fff; }
@@ -84,7 +85,7 @@
     <div class="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">3. Complete</div>
     <p class="text-sm text-zinc-700 mb-4" id="download-msg">Scraping finished successfully!</p>
     <div class="flex gap-3">
-      <button class="rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-sm px-5 py-2.5 transition-colors" id="btn-download" onclick="downloadFile()">Download Excel</button>
+      <button class="rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-sm px-5 py-2.5 transition-colors" id="btn-download" onclick="downloadExcel()">Download Excel</button>
       <button class="rounded-lg bg-zinc-100 hover:bg-zinc-200 text-zinc-900 font-medium text-sm px-5 py-2.5 transition-colors" onclick="resetAll()">Start New Scrape</button>
     </div>
   </div>
@@ -142,7 +143,7 @@ function selectAllCountries(v) {
 }
 
 // ---------- State ----------
-let currentDownloadId = null;
+let scrapedData = [];
 
 function getFilters() {
   const countries = [], tiers = [];
@@ -194,11 +195,12 @@ function clearCount() {
 }
 
 // ---------- Start Scrape ----------
-function startScrape() {
+async function startScrape() {
   const filters = getFilters();
   const lim = document.getElementById("limit-input");
-  const limit = lim ? parseInt(lim.value, 10) : null;
-  if (limit && limit > 0) filters.limit = limit;
+  const limit = lim && lim.value ? parseInt(lim.value, 10) : null;
+
+  scrapedData = [];
 
   document.getElementById("step-select").classList.add("hidden");
   document.getElementById("step-progress").classList.remove("hidden");
@@ -206,39 +208,127 @@ function startScrape() {
   document.getElementById("progress-log").textContent = "";
   document.getElementById("progress-bar").style.width = "0%";
 
-  const events = new EventSourcePost("/api/scrape", filters);
-  events.addEventListener("message", e => { try { handleEvent(JSON.parse(e.data)); } catch(ex) { appendLog("error", "Parse error: " + ex.message); } });
-  events.addEventListener("error", e => {
-    try { const d = JSON.parse(e.data); handleEvent(d); } catch(ex) { appendLog("error", "Connection lost. Reload and try again."); }
-  });
-}
+  appendLog("phase", "=== Phase 1: Collecting partner links ===");
 
-function handleEvent(d) {
-  const bar = document.getElementById("progress-bar");
-  switch (d.type) {
-    case "phase": appendLog("phase", "\n=== " + d.message + " ==="); break;
-    case "listing_page":
-      d.page === 1 ? appendLog("", "Page " + d.page + ": " + d.found + " found (total: " + d.total + ")") : updateLastLog("Page " + d.page + ": " + d.found + " found (total: " + d.total + ")");
-      break;
-    case "collect_done": appendLog("highlight", "\nCollected " + d.total + " partner links."); break;
-    case "limited": appendLog("highlight", "\nLimited to " + d.total + " partners as requested."); break;
-    case "scrape_start": appendLog("", "Scraping " + d.total + " partners (" + d.skipped + " already done)."); break;
-    case "scrape_progress":
-      bar.style.width = (d.total > 0 ? Math.round(d.current / d.total * 100) : 0) + "%";
-      updateLastLog("[" + d.current + "/" + d.total + "] " + d.name);
-      break;
-    case "save": appendLog("", "Progress saved (" + d.current + "/" + d.total + ")."); break;
-    case "already_done": appendLog("highlight", "\n" + d.message); break;
-    case "stop": appendLog("error", "Stopped early."); break;
-    case "done":
-      currentDownloadId = d.download_id; appendLog("done", "\nScraping complete!");
-      document.getElementById("step-progress").classList.add("hidden");
-      document.getElementById("step-download").classList.remove("hidden");
-      break;
-    case "error": appendLog("error", "\nERROR: " + d.message); break;
+  try {
+    const allPartners = await collectAllLinks(filters, limit);
+    if (!allPartners.length) {
+      appendLog("error", "\nNo partners found.");
+      return;
+    }
+
+    const finalLimit = limit && limit > 0 ? Math.min(limit, allPartners.length) : allPartners.length;
+    const toScrape = allPartners.slice(0, finalLimit);
+    appendLog("highlight", "\nCollected " + allPartners.length + " partner links, scraping " + toScrape.length + ".");
+
+    appendLog("phase", "=== Phase 2: Scraping partner details ===");
+
+    const batchSize = 8;
+    const total = toScrape.length;
+    let completed = 0;
+
+    for (let i = 0; i < total; i += batchSize) {
+      const batch = toScrape.slice(i, i + batchSize);
+      const resp = await fetch("/api/scrape-batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ partners: batch })
+      });
+      if (!resp.ok) {
+        let msg = "Batch request failed (" + resp.status + ")";
+        try { const j = await resp.json(); if (j.error) msg = j.error; } catch(e) {}
+        appendLog("error", "\nERROR: " + msg);
+        return;
+      }
+      const data = await resp.json();
+      for (const row of data.results) {
+        scrapedData.push(row);
+        completed++;
+      }
+      const pct = Math.round(completed / total * 100);
+      document.getElementById("progress-bar").style.width = pct + "%";
+      const last = data.results[data.results.length - 1];
+      updateLastLog("[" + completed + "/" + total + "] " + (last ? last.name : ""));
+    }
+
+    appendLog("done", "\nScraping complete!");
+    document.getElementById("step-progress").classList.add("hidden");
+    document.getElementById("step-download").classList.remove("hidden");
+    document.getElementById("download-msg").textContent = "Scraped " + total + " partners successfully.";
+
+  } catch (err) {
+    appendLog("error", "\nERROR: " + err.message);
   }
 }
 
+async function collectAllLinks(filters, limit) {
+  const allPartners = [];
+  let page = 1;
+  let hasMore = true;
+
+  while (hasMore) {
+    const body = { ...filters, page };
+    const resp = await fetch("/api/collect-links", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) {
+      let msg = "Collect request failed (" + resp.status + ")";
+      try { const j = await resp.json(); if (j.error) msg = j.error; } catch(e) {}
+      appendLog("error", "\nERROR: " + msg);
+      return [];
+    }
+    const data = await resp.json();
+    if (data.type === "error") {
+      appendLog("error", "\nERROR: " + data.message);
+      return [];
+    }
+
+    const partners = data.partners || [];
+    allPartners.push(...partners);
+    updateLastLog("Page " + data.page + ": " + data.found + " found (total: " + allPartners.length + ")");
+
+    if (allPartners.length === 0) {
+      hasMore = false;
+    } else if (limit && limit > 0 && allPartners.length >= limit) {
+      hasMore = false;
+    } else if (partners.length === 0) {
+      hasMore = false;
+    } else if (data.total_count && allPartners.length >= data.total_count) {
+      hasMore = false;
+    }
+
+    page++;
+    await sleep(400);
+  }
+
+  return allPartners;
+}
+
+// ---------- Download / Reset ----------
+function downloadExcel() {
+  if (!scrapedData.length) return;
+
+  const wsData = [["Name", "Website", "Email", "Phone", "Location", "Profile URL"]];
+  for (const row of scrapedData) {
+    wsData.push([row.name, row.website, row.email, row.phone, row.location, row.profile_url]);
+  }
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  XLSX.utils.book_append_sheet(wb, ws, "Partners");
+  XLSX.writeFile(wb, "shopify_partners.xlsx");
+}
+
+function resetAll() {
+  scrapedData = [];
+  document.getElementById("step-download").classList.add("hidden");
+  document.getElementById("step-select").classList.remove("hidden");
+  clearCount();
+}
+
+// ---------- Helpers ----------
 function appendLog(cls, txt) {
   const log = document.getElementById("progress-log");
   log.innerHTML += (cls ? '<span class="' + cls + '">' : '') + esc(txt) + (cls ? '</span>' : '') + '\n';
@@ -251,45 +341,7 @@ function updateLastLog(txt) {
   log.innerHTML = l.join("\n"); log.scrollTop = log.scrollHeight;
 }
 function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
-
-// ---------- Download / Reset ----------
-function downloadFile() { if (currentDownloadId) window.location.href = "/api/download/" + currentDownloadId; }
-function resetAll() { currentDownloadId = null; document.getElementById("step-download").classList.add("hidden"); document.getElementById("step-select").classList.remove("hidden"); clearCount(); }
-
-// ---------- SSE via POST ----------
-function EventSourcePost(url, body) {
-  const target = new EventTarget();
-  (async () => {
-    try {
-      const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      if (!resp.ok) {
-        let msg = "Request failed with status " + resp.status;
-        try { const j = await resp.json(); if (j.error) msg = j.error; } catch(e) {}
-        target.dispatchEvent(new MessageEvent("error", { data: JSON.stringify({ type: "error", message: msg }) }));
-        return;
-      }
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() || "";
-        for (const part of parts) {
-          const line = part.trim();
-          if (line.startsWith("data: ")) {
-            target.dispatchEvent(new MessageEvent("message", { data: line.slice(6) }));
-          }
-        }
-      }
-    } catch (err) {
-      target.dispatchEvent(new MessageEvent("error", { data: JSON.stringify({ type: "error", message: err.message }) }));
-    }
-  })();
-  return target;
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 </script>
 </body>
 </html>

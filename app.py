@@ -8,25 +8,21 @@ Run with:
 Then open http://localhost:5000
 """
 
-import json
 import math
 import os
-import threading
 from functools import wraps
 
-from flask import Flask, Response, jsonify, render_template, request, send_file, session, redirect
+from flask import Flask, jsonify, render_template, request, session, redirect
 
 from shopify_partner_scraper import (
     COUNTRIES,
     INDUSTRIES,
     LANGUAGES,
-    OUTPUT_FILE,
     PARTNER_TIERS,
     PARTNERS_PER_PAGE,
     check_listing_count,
-    get_download_path,
-    cleanup_download,
-    run_scrape,
+    collect_listing_page,
+    scrape_batch,
 )
 
 app = Flask(__name__)
@@ -34,8 +30,6 @@ app.secret_key = os.urandom(32).hex()
 
 PASSWORD = "Shopify@123$"
 SESSION_KEY = "authenticated"
-
-_scraping_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +131,12 @@ def api_check_count():
 # API: run scrape (Server-Sent Events)
 # ---------------------------------------------------------------------------
 
-@app.route("/api/scrape", methods=["POST"])
+@app.route("/api/collect-links", methods=["POST"])
 @login_required
-def api_scrape():
+def api_collect_links():
     data = request.get_json(silent=True) or {}
     country_codes = data.get("countries", [])
-    limit = data.get("limit")
+    page = data.get("page", 1)
 
     if not isinstance(country_codes, list):
         return jsonify({"error": "countries must be a list"}), 400
@@ -151,56 +145,25 @@ def api_scrape():
         if cc not in COUNTRIES:
             return jsonify({"error": f"Invalid country code: {cc}"}), 400
 
-    if limit is not None:
-        try:
-            limit = int(limit)
-        except (ValueError, TypeError):
-            return jsonify({"error": "Limit must be a number"}), 400
-
-    if not _scraping_lock.acquire(blocking=False):
-        return jsonify({"error": "A scrape is already in progress. Please wait for it to finish."}), 409
-
     filters = _parse_filters(data)
-
-    def generate():
-        try:
-            output_path = OUTPUT_FILE
-            for event in run_scrape(output_path=output_path, limit=limit, **filters):
-                yield f"data: {json.dumps(event)}\n\n".encode()
-        finally:
-            _scraping_lock.release()
-
-    resp = Response(generate(), mimetype="text/event-stream", headers={
-        "Cache-Control": "no-cache",
-        "X-Accel-Buffering": "no",
-    })
-    resp.direct_passthrough = True
-    return resp
+    result = collect_listing_page(page=page, **filters)
+    return jsonify(result)
 
 
-# ---------------------------------------------------------------------------
-# API: download the completed Excel file
-# ---------------------------------------------------------------------------
-
-@app.route("/api/download/<download_id>")
+@app.route("/api/scrape-batch", methods=["POST"])
 @login_required
-def api_download(download_id):
-    filepath = get_download_path(download_id)
-    if not filepath or not os.path.exists(filepath):
-        return jsonify({"error": "Download not found or expired."}), 404
+def api_scrape_batch():
+    data = request.get_json(silent=True) or {}
+    partners = data.get("partners", [])
 
-    response = send_file(
-        filepath,
-        as_attachment=True,
-        download_name="shopify_partners.xlsx",
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    cleanup_download(download_id)
-    try:
-        os.remove(filepath)
-    except OSError:
-        pass
-    return response
+    if not isinstance(partners, list) or not partners:
+        return jsonify({"error": "partners must be a non-empty list"}), 400
+
+    if len(partners) > 8:
+        return jsonify({"error": "Maximum 8 partners per batch"}), 400
+
+    results = scrape_batch(partners)
+    return jsonify({"type": "batch_done", "results": results})
 
 
 # ---------------------------------------------------------------------------

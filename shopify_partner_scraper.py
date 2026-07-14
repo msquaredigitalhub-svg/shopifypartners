@@ -39,7 +39,7 @@ from openpyxl import Workbook, load_workbook
 
 BASE_LIST_URL = "https://www.shopify.com/partners/directory/services"
 MAX_PAGES = 302
-DELAY_SECONDS = (1.5, 3.0)
+DELAY_SECONDS = (0.3, 0.8)
 OUTPUT_FILE = os.path.join(tempfile.gettempdir(), "shopify_partners.xlsx")
 REQUEST_TIMEOUT = 20
 MAX_RETRIES = 3
@@ -456,6 +456,70 @@ def append_row(wb: Workbook, row: list):
 
 def save(wb: Workbook, path: str):
     wb.save(path)
+
+# ---------------------------------------------------------------------------
+# COLLECT SINGLE PAGE
+# ---------------------------------------------------------------------------
+
+def collect_listing_page(
+    page: int = 1,
+    country_codes: list[str] | None = None,
+    industry: str = "",
+    partner_tiers: list[str] | None = None,
+    language: str = "",
+) -> dict:
+    url = build_list_url(country_codes, page=page, industry=industry,
+                         partner_tiers=partner_tiers, language=language)
+    html = fetch(url)
+    if not html:
+        return {"type": "error", "message": "Failed to fetch listing page", "partners": []}
+
+    soup = BeautifulSoup(html, "html.parser")
+    links = soup.find_all("a", href=re.compile(r"/partners/directory/partner/[^?]+$"))
+
+    total_match = re.search(r"of\s+([\d,]+)(?:</[^>]+>)?\s*partner", html, re.I)
+    total_count = int(total_match.group(1).replace(",", "")) if total_match else 0
+
+    seen_urls: set[str] = set()
+    partners = []
+    for a in links:
+        href = a.get("href")
+        full_url = href if href.startswith("http") else f"https://www.shopify.com{href}"
+        if full_url in seen_urls:
+            continue
+        seen_urls.add(full_url)
+        name_tag = a.find(["h3", "h2"])
+        name = name_tag.get_text(strip=True) if name_tag else a.get_text(strip=True)[:80]
+        partners.append({"name": name, "profile_url": full_url})
+
+    return {
+        "type": "listing_page",
+        "page": page,
+        "found": len(partners),
+        "total_collected": len(partners),
+        "total_count": total_count,
+        "partners": partners,
+    }
+
+
+# ---------------------------------------------------------------------------
+# SCRAPE BATCH (for Vercel-friendly chunking)
+# ---------------------------------------------------------------------------
+
+def scrape_batch(partners: list[dict]) -> list[dict]:
+    results = []
+    for partner in partners:
+        detail = scrape_partner_detail(partner["profile_url"])
+        results.append({
+            "name": partner["name"],
+            "website": detail["website"],
+            "email": detail["email"],
+            "phone": detail["phone"],
+            "location": detail["location"],
+            "profile_url": partner["profile_url"],
+        })
+    return results
+
 
 # ---------------------------------------------------------------------------
 # FULL SCRAPE GENERATOR
