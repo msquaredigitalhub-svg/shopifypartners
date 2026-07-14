@@ -77,6 +77,9 @@
     <div class="bg-zinc-200 rounded-full h-2 overflow-hidden">
       <div class="h-full bg-blue-600 rounded-full transition-all duration-300" id="progress-bar" style="width:0%"></div>
     </div>
+    <div class="mt-3">
+      <button class="text-xs font-medium text-zinc-600 bg-zinc-100 hover:bg-zinc-200 rounded-md px-3 py-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed" id="btn-partial" onclick="downloadPartial()" disabled>Download Scraped So Far</button>
+    </div>
     <div class="bg-zinc-900 text-emerald-400 rounded-lg p-4 font-mono text-sm leading-relaxed mt-4 max-h-80 overflow-y-auto whitespace-pre-wrap break-all" id="progress-log"></div>
   </div>
 
@@ -245,6 +248,7 @@ async function startScrape() {
         scrapedData.push(row);
         completed++;
       }
+      enablePartialBtn();
       const pct = Math.round(completed / total * 100);
       document.getElementById("progress-bar").style.width = pct + "%";
       const last = data.results[data.results.length - 1];
@@ -304,6 +308,24 @@ async function collectAllLinks(filters, limit) {
   }
 
   return allPartners;
+}
+
+// ---------- Partial download during progress ----------
+function enablePartialBtn() {
+  const btn = document.getElementById("btn-partial");
+  if (btn.disabled && scrapedData.length > 0) btn.disabled = false;
+}
+
+function downloadPartial() {
+  if (!scrapedData.length) return;
+  const wsData = [["Name", "Website", "Email", "Phone", "Location", "Profile URL"]];
+  for (const row of scrapedData) {
+    wsData.push([row.name, row.website, row.email, row.phone, row.location, row.profile_url]);
+  }
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  XLSX.utils.book_append_sheet(wb, ws, "Partners");
+  XLSX.writeFile(wb, "shopify_partners_partial.xlsx");
 }
 
 // ---------- Download / Reset ----------
